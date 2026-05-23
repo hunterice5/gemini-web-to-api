@@ -98,7 +98,20 @@ func (h *OpenAIController) HandleChatCompletions(c fiber.Ctx) error {
 			})
 			if err != nil {
 				h.log.Error("CreateChatCompletionStream failed", zap.Error(err), zap.String("model", req.Model))
-				// Optionally send actual OpenAI error JSON here, but for now just close.
+				errChunk := dto.ChatCompletionChunk{
+					ID:      fmt.Sprintf("chatcmpl-err-%d", time.Now().UnixNano()),
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   req.Model,
+					Choices: []dto.ChunkChoice{{
+						Index:        0,
+						Delta:        dto.ChatCompletionChunkDelta{Content: fmt.Sprintf("[ERROR] %s", err.Error())},
+						FinishReason: "stop",
+					}},
+				}
+				utils.SendSSEEvent(w, h.log, errChunk)
+				_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+				_ = w.Flush()
 				return
 			}
 			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")

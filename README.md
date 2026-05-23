@@ -133,11 +133,11 @@ cd gemini-web-to-api
 
 Pick whichever method suits your setup:
 
-| Method | Command | Requirements |
-|---|---|---|
-| 🐳 Docker Compose | `docker compose up -d --build` | Docker |
-| 🐹 Go direct | `go run cmd/server/main.go` | [Go 1.21+](https://golang.org/dl/) |
-| ⚡ Task (dev mode) | `task dev` | [Task](https://taskfile.dev) |
+| Method             | Command                        | Requirements                       |
+| ------------------ | ------------------------------ | ---------------------------------- |
+| 🐳 Docker Compose  | `docker compose up -d --build` | Docker                             |
+| 🐹 Go direct       | `go run cmd/server/main.go`    | [Go 1.21+](https://golang.org/dl/) |
+| ⚡ Task (dev mode) | `task dev`                     | [Task](https://taskfile.dev)       |
 
 **Done!** Jump to [Test it](#-test-it). 🎉
 
@@ -161,8 +161,8 @@ Your Gemini Web To API is running at `http://localhost:4981` 🎉
 - 🔌 **Drop-in Replacement**: Works with existing OpenAI / Claude / Gemini SDKs
 - 🔄 **Smart Session Management**: Auto-rotates cookies to keep sessions alive
 - ⚡ **High Performance**: Built with Go and Fiber for speed
-- 🐳 **Production Ready**: Docker Compose support, Swagger UI, health checks
-- 📝 **Well Documented**: Interactive API docs at `/swagger/`
+- 🐳 **Production Ready**: Docker Compose support, Scalar UI, health checks
+- 📝 **Well Documented**: Interactive API docs at `/docs`
 
 ---
 
@@ -170,16 +170,16 @@ Your Gemini Web To API is running at `http://localhost:4981` 🎉
 
 ### Environment Variables
 
-| Variable                  | Required | Default | Description                                          |
-| ------------------------- | -------- | ------- | ---------------------------------------------------- |
-| `GEMINI_1PSID`            | ✅ Yes   | —       | Main session cookie from Gemini                      |
-| `GEMINI_1PSIDTS`          | ✅ Yes   | —       | Timestamp cookie (prevents auth errors)              |
-| `GEMINI_REFRESH_INTERVAL` | ❌ No    | `30`    | Cookie rotation interval (minutes)                   |
-| `GEMINI_MAX_RETRIES`      | ❌ No    | `3`     | Max retry attempts when an API call fails            |
-| `PORT`                    | ❌ No    | `4981`  | Server port                                          |
-| `RATE_LIMIT_ENABLED`      | ❌ No    | `false` | Enable or disable rate limiting                      |
-| `RATE_LIMIT_WINDOW_MS`    | ❌ No    | `60000` | Rate limit time window in milliseconds               |
-| `RATE_LIMIT_MAX_REQUESTS` | ❌ No    | `10`    | Maximum number of requests allowed per time window   |
+| Variable                  | Required | Default | Description                                        |
+| ------------------------- | -------- | ------- | -------------------------------------------------- |
+| `GEMINI_1PSID`            | ✅ Yes   | —       | Main session cookie from Gemini                    |
+| `GEMINI_1PSIDTS`          | ✅ Yes   | —       | Timestamp cookie (prevents auth errors)            |
+| `GEMINI_REFRESH_INTERVAL` | ❌ No    | `30`    | Cookie rotation interval (minutes)                 |
+| `GEMINI_MAX_RETRIES`      | ❌ No    | `3`     | Max retry attempts when an API call fails          |
+| `PORT`                    | ❌ No    | `4981`  | Server port                                        |
+| `RATE_LIMIT_ENABLED`      | ❌ No    | `false` | Enable or disable rate limiting                    |
+| `RATE_LIMIT_WINDOW_MS`    | ❌ No    | `60000` | Rate limit time window in milliseconds             |
+| `RATE_LIMIT_MAX_REQUESTS` | ❌ No    | `10`    | Maximum number of requests allowed per time window |
 
 ### Configuration Priority
 
@@ -257,9 +257,9 @@ More examples are available in the [`examples/`](examples/) directory.
 
 ## 📘 API Documentation
 
-Once running, visit **`http://localhost:4981/swagger/index.html`** for interactive API documentation.
+Once running, visit **`http://localhost:4981/docs`** for interactive API documentation powered by [Scalar](https://scalar.com).
 
-![Swagger UI](assets/swagger.png)
+![Scalar UI](assets/swagger.png)
 
 ---
 

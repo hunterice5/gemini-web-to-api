@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,12 +25,13 @@ import (
 )
 
 type Client struct {
-	httpClient *req.Client
-	cookies    *CookieStore
-	at         string
-	mu         sync.RWMutex // protects: at, healthy
-	healthy    bool
-	log        *zap.Logger
+	httpClient   *req.Client
+	cookies      *CookieStore
+	at           string
+	cookieHeader string // full Cookie header string built by refreshSessionToken, used in GenerateContent
+	mu           sync.RWMutex // protects: at, healthy, cookieHeader
+	healthy      bool
+	log          *zap.Logger
 
 	autoRefresh     bool
 	refreshInterval time.Duration
@@ -257,6 +259,8 @@ func (c *Client) refreshSessionToken() error {
 	bodyBytes, _ := io.ReadAll(bodyReader)
 	body := string(bodyBytes)
 
+	// Merge cookies from the init response into cookieStr
+	cookieStr = mergeCookies(cookieStr, resp.Cookies())
 
 	re := regexp.MustCompile(`"SNlM0e":"([^"]+)"`)
 	matches := re.FindStringSubmatch(body)
@@ -264,14 +268,10 @@ func (c *Client) refreshSessionToken() error {
 		reFallback := regexp.MustCompile(`\["SNlM0e","([^"]+)"\]`)
 		matches = reFallback.FindStringSubmatch(body)
 		if len(matches) < 2 {
-
-
 			errMsg := "authentication failed: SNlM0e not found"
 			if strings.Contains(body, "Sign in") || strings.Contains(body, "login") {
 				errMsg = "authentication failed: cookies invalid. Please provide __Secure-1PSIDTS in addition to __Secure-1PSID"
 			}
-
-			// Log as Info to avoid stack trace for expected auth failures
 			c.log.Info(errMsg)
 			return fmt.Errorf("%s", errMsg)
 		}
@@ -279,6 +279,7 @@ func (c *Client) refreshSessionToken() error {
 
 	c.mu.Lock()
 	c.at = matches[1]
+	c.cookieHeader = cookieStr // save full cookie string for use in GenerateContent
 	c.healthy = true
 	c.mu.Unlock()
 
@@ -298,13 +299,14 @@ func (c *Client) refreshModels(body string) {
 	modelIDRegex := regexp.MustCompile(`gemini-[a-zA-Z0-9.-]+`)
 	matches := modelIDRegex.FindAllString(body, -1)
 	
+	// Only keep real generative models: version number after gemini- (e.g. gemini-2.0-flash)
+	// or well-known names like gemini-advanced. Excludes UI config entries like gemini-u-* and gemini-apps-*.
+	validModelPrefix := regexp.MustCompile(`^gemini-(\d|advanced)`)
+
 	uniqueIDs := make(map[string]bool)
 	for _, id := range matches {
-		// Clean up potential trailing backslashes or quotes if they were caught
 		id = strings.Trim(id, `\"' `)
-		
-		// Basic validation: ensure it doesn't look like a generic string or partial ID
-		if !uniqueIDs[id] && len(id) > 10 {
+		if !uniqueIDs[id] && len(id) > 10 && validModelPrefix.MatchString(id) {
 			uniqueIDs[id] = true
 			newModels = append(newModels, ModelInfo{
 				ID:       id,
@@ -444,10 +446,11 @@ func (c *Client) RotateCookies() error {
 
 	if found {
 		c.log.Info("Cookie rotated successfully", zap.Time("updated_at", c.cookies.UpdatedAt))
-		return nil
+	} else {
+		// Google returns 200 but omits a new cookie when the existing one is still valid — not an error
+		c.log.Debug("No new __Secure-1PSIDTS issued; existing cookie is still valid")
 	}
-
-	return errors.New("no new __Secure-1PSIDTS cookie received")
+	return nil
 }
 
 func (c *Client) GetCookies() *CookieStore {
@@ -484,6 +487,7 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 		}
 	}
 	at := c.at
+	cookieHdr := c.cookieHeader
 	c.mu.RUnlock()
 
 	if !found && config.Model != "" {
@@ -495,7 +499,6 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 	}
 
 	// Build request payload
-	// The structure confirmed to work for model selection is [ [prompt], nil, nil, model ]
 	inner := []interface{}{
 		[]interface{}{prompt},
 		nil,
@@ -507,22 +510,28 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 	outer := []interface{}{nil, string(innerJSON)}
 	outerJSON, _ := json.Marshal(outer)
 
-	formData := map[string]string{
-		"at":    at,
-		"f.req": string(outerJSON),
-	}
+	// Encode form body manually to have full control over the request
+	formValues := url.Values{}
+	formValues.Set("at", at)
+	formValues.Set("f.req", string(outerJSON))
+	formBody := formValues.Encode()
+
+	// Build the endpoint URL with the "at" query param (required by Gemini)
+	generateURL := EndpointGenerate + "?at=" + url.QueryEscape(at)
 
 	maxAttempts := c.maxRetries
 	if maxAttempts <= 0 {
 		maxAttempts = 1
 	}
 
+	// Use a plain http.Client to avoid cookie accumulation issues with the req library
+	plainClient := &http.Client{Timeout: 5 * time.Minute}
+
 	totalStart := time.Now()
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
-			// Exponential backoff: 1s, 2s, 4s...
 			backoff := time.Duration(1<<uint(attempt-2)) * time.Second
 			c.log.Warn("Retrying GenerateContent",
 				zap.Int("attempt", attempt),
@@ -538,12 +547,22 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 		}
 
 		httpStart := time.Now()
-		resp, err := c.httpClient.R().
-			SetContext(ctx).
-			SetFormData(formData).
-			SetQueryParam("at", at).
-			Post(EndpointGenerate)
 
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", generateURL, strings.NewReader(formBody))
+		if err != nil {
+			lastErr = fmt.Errorf("failed to build generate request: %w", err)
+			continue
+		}
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
+		httpReq.Header.Set("Origin", "https://gemini.google.com")
+		httpReq.Header.Set("Referer", "https://gemini.google.com/")
+		httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		httpReq.Header.Set("X-Same-Domain", "1")
+		if cookieHdr != "" {
+			httpReq.Header.Set("Cookie", cookieHdr)
+		}
+
+		httpResp, err := plainClient.Do(httpReq)
 		httpDuration := time.Since(httpStart)
 		if err != nil {
 			c.log.Warn("Generate request failed, will retry",
@@ -554,22 +573,31 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 			lastErr = err
 			continue
 		}
+		defer httpResp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("generate failed with status: %d", resp.StatusCode)
-			// Only retry on 5xx (server errors), not 4xx (client errors)
-			if resp.StatusCode >= 500 {
-				c.log.Warn("Server error, will retry",
-					zap.Int("status", resp.StatusCode),
-					zap.Int("attempt", attempt),
-				)
+		if httpResp.StatusCode != http.StatusOK {
+			bodySnippet, _ := io.ReadAll(io.LimitReader(httpResp.Body, 512))
+			lastErr = fmt.Errorf("generate failed with status: %d", httpResp.StatusCode)
+			c.log.Warn("Generate returned non-200",
+				zap.Int("status", httpResp.StatusCode),
+				zap.String("body_snippet", string(bodySnippet)),
+				zap.Int("attempt", attempt),
+			)
+			if httpResp.StatusCode >= 500 {
 				continue
 			}
 			return nil, lastErr
 		}
 
+		respBytes, err := io.ReadAll(httpResp.Body)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read generate response: %w", err)
+			continue
+		}
+		respBody := string(respBytes)
+
 		parseStart := time.Now()
-		result, parseErr := c.parseResponse(resp.String())
+		result, parseErr := c.parseResponse(respBody)
 		parseDuration := time.Since(parseStart)
 
 		if parseErr != nil {
@@ -586,7 +614,7 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 			zap.Duration("parse_duration", parseDuration),
 			zap.Duration("total_duration", time.Since(totalStart)),
 			zap.Int("attempt", attempt),
-			zap.Int("response_bytes", len(resp.String())),
+			zap.Int("response_bytes", len(respBody)),
 		)
 
 		if attempt > 1 {
