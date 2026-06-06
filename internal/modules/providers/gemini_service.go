@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,7 @@ import (
 
 	"gemini-web-to-api/internal/commons/configs"
 
+	"github.com/google/uuid"
 	"github.com/imroc/req/v3"
 	"go.uber.org/zap"
 )
@@ -29,7 +31,11 @@ type Client struct {
 	cookies      *CookieStore
 	at           string
 	cookieHeader string // full Cookie header string built by refreshSessionToken, used in GenerateContent
-	mu           sync.RWMutex // protects: at, healthy, cookieHeader
+	pushID       string
+	buildLabel   string
+	sessionID    string
+	language     string
+	mu           sync.RWMutex // protects: at, healthy, cookieHeader, pushID, buildLabel, sessionID, language
 	healthy      bool
 	log          *zap.Logger
 
@@ -87,7 +93,7 @@ func (c *Client) Init(ctx context.Context) error {
 	// Check if we should use cached cookies or clear cache
 	if c.cookies.Secure1PSID != "" {
 		cachedTS, err := c.LoadCachedCookies()
-		
+
 		// If config has a new PSIDTS that differs from cache, clear cache and use config
 		if configPSIDTS != "" && cachedTS != "" && configPSIDTS != cachedTS {
 			_ = c.ClearCookieCache()
@@ -147,7 +153,7 @@ func (c *Client) refreshSessionToken() error {
 	tmpClient := req.NewClient().
 		SetTimeout(30 * time.Second).
 		SetUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	
+
 	resp1, err := tmpClient.R().Get("https://www.google.com/")
 	extraCookies := ""
 	if err == nil {
@@ -163,7 +169,7 @@ func (c *Client) refreshSessionToken() error {
 	}
 
 	// 2. Prepare full cookie string
-	cookieStr := fmt.Sprintf("%s__Secure-1PSID=%s; __Secure-1PSIDTS=%s", 
+	cookieStr := fmt.Sprintf("%s__Secure-1PSID=%s; __Secure-1PSIDTS=%s",
 		extraCookies, c.cookies.Secure1PSID, c.cookies.Secure1PSIDTS)
 
 	commonHeaders := map[string]string{
@@ -246,7 +252,7 @@ func (c *Client) refreshSessionToken() error {
 	// Dump for debugging if it fails
 	// reqDump, _ := httputil.DumpRequestOut(req2, false)
 	// respDump, _ := httputil.DumpResponse(resp, false)
-	
+
 	var bodyReader io.ReadCloser = resp.Body
 	if strings.Contains(resp.Header.Get("Content-Encoding"), "gzip") {
 		gz, err := gzip.NewReader(resp.Body)
@@ -277,9 +283,30 @@ func (c *Client) refreshSessionToken() error {
 		}
 	}
 
+	pushID := "feeds/mcudyrk2a4khkz"
+	if pushMatches := regexp.MustCompile(`"qKIAYe":"([^"]+)"`).FindStringSubmatch(body); len(pushMatches) >= 2 {
+		pushID = pushMatches[1]
+	}
+	buildLabel := ""
+	if buildMatches := regexp.MustCompile(`"cfb2h":"([^"]+)"`).FindStringSubmatch(body); len(buildMatches) >= 2 {
+		buildLabel = buildMatches[1]
+	}
+	sessionID := ""
+	if sessionMatches := regexp.MustCompile(`"FdrFJe":"([^"]+)"`).FindStringSubmatch(body); len(sessionMatches) >= 2 {
+		sessionID = sessionMatches[1]
+	}
+	language := "en"
+	if langMatches := regexp.MustCompile(`"TuX5cc":"([^"]+)"`).FindStringSubmatch(body); len(langMatches) >= 2 {
+		language = langMatches[1]
+	}
+
 	c.mu.Lock()
 	c.at = matches[1]
 	c.cookieHeader = cookieStr // save full cookie string for use in GenerateContent
+	c.pushID = pushID
+	c.buildLabel = buildLabel
+	c.sessionID = sessionID
+	c.language = language
 	c.healthy = true
 	c.mu.Unlock()
 
@@ -298,7 +325,7 @@ func (c *Client) refreshModels(body string) {
 	// We look for gemini- followed by alphanumeric characters, dots, or dashes.
 	modelIDRegex := regexp.MustCompile(`gemini-[a-zA-Z0-9.-]+`)
 	matches := modelIDRegex.FindAllString(body, -1)
-	
+
 	// Only keep real generative models: version number after gemini- (e.g. gemini-2.0-flash)
 	// or well-known names like gemini-advanced. Excludes UI config entries like gemini-u-* and gemini-apps-*.
 	validModelPrefix := regexp.MustCompile(`^gemini-(\d|advanced)`)
@@ -320,7 +347,7 @@ func (c *Client) refreshModels(body string) {
 	c.mu.Lock()
 	c.cachedModels = newModels
 	c.mu.Unlock()
-	
+
 	if len(newModels) == 0 {
 		c.log.Warn("⚠️ No models found in Gemini Web response. Please check your cookies or connection.")
 	} else {
@@ -409,7 +436,7 @@ func (c *Client) RotateCookies() error {
 	// Payload must be exactly this string
 	strBody := `[000,"-0000000000000000000"]`
 	req, _ := http.NewRequest("POST", EndpointRotateCookies, strings.NewReader(strBody))
-	
+
 	req.Header.Set("Content-Type", "application/json")
 	// Google often blocks requests with default Go-http-client User-Agent
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -456,7 +483,7 @@ func (c *Client) RotateCookies() error {
 func (c *Client) GetCookies() *CookieStore {
 	c.cookies.mu.RLock()
 	defer c.cookies.mu.RUnlock()
-	
+
 	return &CookieStore{
 		Secure1PSID:   c.cookies.Secure1PSID,
 		Secure1PSIDTS: c.cookies.Secure1PSIDTS,
@@ -477,7 +504,7 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 			config.Model = c.cachedModels[0].ID
 		}
 	}
-	
+
 	// Strictly enforce that we only use models found/confirmed from the web
 	found := false
 	for _, m := range c.cachedModels {
@@ -488,7 +515,13 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 	}
 	at := c.at
 	cookieHdr := c.cookieHeader
+	buildLabel := c.buildLabel
+	sessionID := c.sessionID
+	language := c.language
 	c.mu.RUnlock()
+	if language == "" {
+		language = "en"
+	}
 
 	if !found && config.Model != "" {
 		return nil, fmt.Errorf("model '%s' is not supported or not available. Available models: %v", config.Model, c.ListModelsIDs())
@@ -498,13 +531,13 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 		return nil, errors.New("client not initialized")
 	}
 
-	// Build request payload
-	inner := []interface{}{
-		[]interface{}{prompt},
-		nil,
-		nil,
-		config.Model,
+	uploadedFiles, err := c.uploadRequestFiles(ctx, config, cookieHdr)
+	if err != nil {
+		return nil, err
 	}
+
+	requestID := strings.ToUpper(uuid.NewString())
+	inner := buildGenerateInner(prompt, uploadedFiles, config.Model, language, requestID)
 
 	innerJSON, _ := json.Marshal(inner)
 	outer := []interface{}{nil, string(innerJSON)}
@@ -516,8 +549,20 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 	formValues.Set("f.req", string(outerJSON))
 	formBody := formValues.Encode()
 
-	// Build the endpoint URL with the "at" query param (required by Gemini)
-	generateURL := EndpointGenerate + "?at=" + url.QueryEscape(at)
+	queryValues := url.Values{}
+	queryValues.Set("at", at)
+	if len(uploadedFiles) > 0 {
+		queryValues.Set("hl", language)
+		queryValues.Set("_reqid", fmt.Sprintf("%d", rand.Intn(90000)+10000))
+		queryValues.Set("rt", "c")
+		if buildLabel != "" {
+			queryValues.Set("bl", buildLabel)
+		}
+		if sessionID != "" {
+			queryValues.Set("f.sid", sessionID)
+		}
+	}
+	generateURL := EndpointGenerate + "?" + queryValues.Encode()
 
 	maxAttempts := c.maxRetries
 	if maxAttempts <= 0 {
@@ -558,6 +603,9 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 		httpReq.Header.Set("Referer", "https://gemini.google.com/")
 		httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 		httpReq.Header.Set("X-Same-Domain", "1")
+		if len(uploadedFiles) > 0 {
+			httpReq.Header.Set("x-goog-ext-525005358-jspb", fmt.Sprintf(`["%s",1]`, requestID))
+		}
 		if cookieHdr != "" {
 			httpReq.Header.Set("Cookie", cookieHdr)
 		}
@@ -630,6 +678,43 @@ func (c *Client) GenerateContent(ctx context.Context, prompt string, options ...
 	return nil, fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
 }
 
+func buildGenerateInner(prompt string, files []uploadedFile, model, language, requestID string) []interface{} {
+	if len(files) == 0 {
+		return []interface{}{
+			[]interface{}{prompt},
+			nil,
+			nil,
+			model,
+		}
+	}
+
+	fileData := make([]interface{}, 0, len(files))
+	for _, file := range files {
+		fileData = append(fileData, []interface{}{[]interface{}{file.ID}, file.Name})
+	}
+
+	messageContent := []interface{}{prompt, 0, nil, fileData, nil, nil, 0}
+	defaultMetadata := []interface{}{"", "", "", nil, nil, nil, nil, nil, nil, ""}
+	inner := make([]interface{}, 69)
+	inner[0] = messageContent
+	inner[1] = []interface{}{language}
+	inner[2] = defaultMetadata
+	inner[6] = []interface{}{1}
+	inner[7] = 1
+	inner[10] = 1
+	inner[11] = 0
+	inner[17] = []interface{}{[]interface{}{0}}
+	inner[18] = 0
+	inner[27] = 1
+	inner[30] = []interface{}{4}
+	inner[41] = []interface{}{1}
+	inner[53] = 0
+	inner[59] = requestID
+	inner[61] = []interface{}{}
+	inner[68] = 2
+	return inner
+}
+
 func (c *Client) StartChat(options ...ChatOption) ChatSession {
 	config := &ChatConfig{}
 	for _, opt := range options {
@@ -673,18 +758,18 @@ func (c *Client) IsHealthy() bool {
 func (c *Client) ListModels() []ModelInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	if len(c.cachedModels) == 0 {
 		return []ModelInfo{}
 	}
-	
+
 	return c.cachedModels
 }
 
 func (c *Client) ListModelsIDs() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	ids := make([]string, 0, len(c.cachedModels))
 	for _, m := range c.cachedModels {
 		ids = append(ids, m.ID)
@@ -873,22 +958,23 @@ func (c *Client) ClearCookieCache() error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	
+
 	return nil
 }
 
 const (
-EndpointGoogle        = "https://www.google.com"
-EndpointInit          = "https://gemini.google.com/app"
-EndpointGenerate      = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-EndpointRotateCookies = "https://accounts.google.com/RotateCookies"
-EndpointBatchExec     = "https://gemini.google.com/_/BardChatUi/data/batchexecute"
+	EndpointGoogle        = "https://www.google.com"
+	EndpointInit          = "https://gemini.google.com/app"
+	EndpointGenerate      = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+	EndpointRotateCookies = "https://accounts.google.com/RotateCookies"
+	EndpointUpload        = "https://content-push.googleapis.com/upload"
+	EndpointBatchExec     = "https://gemini.google.com/_/BardChatUi/data/batchexecute"
 )
 
 var DefaultHeaders = map[string]string{
-"Content-Type":  "application/x-www-form-urlencoded;charset=utf-8",
-"Origin":        "https://gemini.google.com",
-"Referer":       "https://gemini.google.com/",
-"User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-"X-Same-Domain": "1",
+	"Content-Type":  "application/x-www-form-urlencoded;charset=utf-8",
+	"Origin":        "https://gemini.google.com",
+	"Referer":       "https://gemini.google.com/",
+	"User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	"X-Same-Domain": "1",
 }

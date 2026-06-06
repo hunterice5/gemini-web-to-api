@@ -1,6 +1,7 @@
 package dto
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -8,16 +9,23 @@ import (
 	models "gemini-web-to-api/internal/commons/models"
 )
 
-// ChatCompletionMessageContentPart represents OpenAI content part (text-only handling)
+// ChatCompletionMessageContentPart represents OpenAI multimodal content parts.
 type ChatCompletionMessageContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *ImageURLPart `json:"image_url,omitempty"`
 }
 
-// ChatCompletionMessage supports both content string and content array (text parts)
+// ImageURLPart represents OpenAI-compatible image_url content.
+type ImageURLPart struct {
+	URL string `json:"url"`
+}
+
+// ChatCompletionMessage supports both content string and content array.
 type ChatCompletionMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role        string              `json:"role"`
+	Content     string              `json:"content"`
+	Attachments []models.Attachment `json:"attachments,omitempty"`
 }
 
 func (m *ChatCompletionMessage) UnmarshalJSON(data []byte) error {
@@ -32,9 +40,10 @@ func (m *ChatCompletionMessage) UnmarshalJSON(data []byte) error {
 	}
 
 	m.Role = raw.Role
+	m.Content = ""
+	m.Attachments = nil
 
 	if len(raw.Content) == 0 || string(raw.Content) == "null" {
-		m.Content = ""
 		return nil
 	}
 
@@ -47,12 +56,24 @@ func (m *ChatCompletionMessage) UnmarshalJSON(data []byte) error {
 	var parts []ChatCompletionMessageContentPart
 	if err := json.Unmarshal(raw.Content, &parts); err == nil {
 		textParts := make([]string, 0, len(parts))
+		attachments := make([]models.Attachment, 0)
 		for _, p := range parts {
-			if strings.EqualFold(p.Type, "text") && p.Text != "" {
-				textParts = append(textParts, p.Text)
+			switch strings.ToLower(strings.TrimSpace(p.Type)) {
+			case "text":
+				if p.Text != "" {
+					textParts = append(textParts, p.Text)
+				}
+			case "image_url", "input_image":
+				if p.ImageURL == nil {
+					continue
+				}
+				if attachment, ok := attachmentFromDataURL(p.ImageURL.URL, len(attachments)+1); ok {
+					attachments = append(attachments, attachment)
+				}
 			}
 		}
 		m.Content = strings.Join(textParts, "\n")
+		m.Attachments = attachments
 		return nil
 	}
 
@@ -61,8 +82,54 @@ func (m *ChatCompletionMessage) UnmarshalJSON(data []byte) error {
 
 func (m ChatCompletionMessage) ToModelMessage() models.Message {
 	return models.Message{
-		Role:    m.Role,
-		Content: m.Content,
+		Role:        m.Role,
+		Content:     m.Content,
+		Attachments: m.Attachments,
+	}
+}
+
+func attachmentFromDataURL(value string, index int) (models.Attachment, bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "data:") {
+		return models.Attachment{}, false
+	}
+
+	metaAndData := strings.SplitN(strings.TrimPrefix(value, "data:"), ",", 2)
+	if len(metaAndData) != 2 {
+		return models.Attachment{}, false
+	}
+
+	meta := metaAndData[0]
+	if !strings.Contains(strings.ToLower(meta), ";base64") {
+		return models.Attachment{}, false
+	}
+	mimeType := strings.TrimSuffix(meta, ";base64")
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	if _, err := base64.StdEncoding.DecodeString(metaAndData[1]); err != nil {
+		return models.Attachment{}, false
+	}
+
+	return models.Attachment{
+		Name:     fmt.Sprintf("image_%d%s", index, extensionFromMimeType(mimeType)),
+		MimeType: mimeType,
+		Data:     metaAndData[1],
+	}, true
+}
+
+func extensionFromMimeType(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	default:
+		return ".bin"
 	}
 }
 
@@ -227,7 +294,7 @@ type ChatCompletionChunk struct {
 
 // ChunkChoice represents a choice in a chunk
 type ChunkChoice struct {
-	Index        int                     `json:"index"`
+	Index        int                      `json:"index"`
 	Delta        ChatCompletionChunkDelta `json:"delta"`
-	FinishReason string                  `json:"finish_reason,omitempty"`
+	FinishReason string                   `json:"finish_reason,omitempty"`
 }

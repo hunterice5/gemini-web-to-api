@@ -1,5 +1,7 @@
 package dto
 
+import models "gemini-web-to-api/internal/commons/models"
+
 // DeepResearchRequest represents a deep research request
 type DeepResearchRequest struct {
 	// Query is the research topic or question
@@ -10,6 +12,8 @@ type DeepResearchRequest struct {
 	Language string `json:"language,omitempty"`
 	// MaxSources maximum number of web sources to consult (optional)
 	MaxSources int `json:"max_sources,omitempty"`
+	// Images optional base64 images to use as research context
+	Images []models.Attachment `json:"images,omitempty"`
 }
 
 // DeepResearchResponse represents a deep research response
@@ -100,6 +104,8 @@ type InteractionCreateRequest struct {
 	Language string `json:"language,omitempty"`
 	// MaxSources max number of web sources to consult
 	MaxSources int `json:"max_sources,omitempty"`
+	// Images optional base64 images to use as research context
+	Images []models.Attachment `json:"images,omitempty"`
 }
 
 // InteractionOutput holds a single output item in the interaction result
@@ -131,5 +137,3 @@ type InteractionResponse struct {
 	// DurationMs total research duration in milliseconds
 	DurationMs int64 `json:"duration_ms,omitempty"`
 }
-
-

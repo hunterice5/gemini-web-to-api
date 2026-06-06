@@ -50,6 +50,16 @@ func (s *ClaudeService) GenerateMessage(ctx context.Context, req dto.MessageRequ
 	}
 
 	opts := []providers.GenerateOption{}
+	if req.Model != "" {
+		opts = append(opts, providers.WithModel(req.Model))
+	}
+	inputFiles, err := providers.InputFilesFromAttachments(req.Messages)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputFiles) > 0 {
+		opts = append(opts, providers.WithInputFiles(inputFiles))
+	}
 
 	// Logic: Call Provider
 	response, err := s.client.GenerateContent(ctx, prompt, opts...)

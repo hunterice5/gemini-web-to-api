@@ -17,6 +17,7 @@ type DeepResearchConfig struct {
 	Model      string
 	Language   string
 	MaxSources int
+	InputFiles []InputFile
 }
 
 // DeepResearchOption configures a deep research request
@@ -35,6 +36,11 @@ func WithResearchLanguage(lang string) DeepResearchOption {
 // WithResearchMaxSources sets max sources cap
 func WithResearchMaxSources(n int) DeepResearchOption {
 	return func(c *DeepResearchConfig) { c.MaxSources = n }
+}
+
+// WithResearchInputFiles adds uploaded files/images as research context.
+func WithResearchInputFiles(files []InputFile) DeepResearchOption {
+	return func(c *DeepResearchConfig) { c.InputFiles = files }
 }
 
 // DeepResearchResult is the result of a deep research operation
@@ -222,6 +228,30 @@ Provide 2-4 realistic sources that would typically be consulted for this topic.`
 	return result, nil
 }
 
+func (c *Client) analyzeResearchInputFiles(ctx context.Context, query, language, model string, files []InputFile) (string, error) {
+	if len(files) == 0 {
+		return "", nil
+	}
+
+	queryJSON, _ := json.Marshal(query)
+	prompt := fmt.Sprintf(`Analyze the attached image(s) as research context for the following topic.
+
+RESEARCH TOPIC: %s
+
+Return a detailed textual description in %s that captures:
+- visible objects, text, people, UI elements, charts, diagrams, or documents
+- any facts or clues relevant to the research topic
+- uncertainties or details that need external verification
+
+This description will be used as context for a deep research workflow.`, string(queryJSON), language)
+
+	resp, err := c.GenerateContent(ctx, prompt, WithModel(model), WithInputFiles(files))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Text), nil
+}
+
 // --------------------------------------------------------------------------
 // Step 3: synthesize all sub-research into final report
 // --------------------------------------------------------------------------
@@ -230,7 +260,9 @@ func (c *Client) synthesizeReport(ctx context.Context, query, language, model st
 	var sb strings.Builder
 	queryJSON, _ := json.Marshal(query)
 	sb.WriteString(fmt.Sprintf("RESEARCH TOPIC: %s\n\n", string(queryJSON)))
-	sb.WriteString("REPORT OUTLINE: " + strings.Join(plan.Outline, " | ") + "\n\n")
+	sb.WriteString("REPORT OUTLINE: ")
+	sb.WriteString(strings.Join(plan.Outline, " | "))
+	sb.WriteString("\n\n")
 	sb.WriteString("RESEARCH FINDINGS:\n")
 	for i, r := range subResults {
 		questionJSON, _ := json.Marshal(r.Question)
@@ -281,9 +313,30 @@ func (c *Client) DeepResearch(ctx context.Context, query string, opts ...DeepRes
 
 	c.log.Info("🔬 Deep research starting", zap.String("query", query), zap.String("model", model))
 
+	originalQuery := query
+
 	var steps []StepInfo
 	var allSources []SourceInfo
 	stepNum := 0
+
+	if len(cfg.InputFiles) > 0 {
+		stepNum++
+		c.log.Info("Analyzing attached research image(s)", zap.Int("files", len(cfg.InputFiles)))
+		imageContext, err := c.analyzeResearchInputFiles(ctx, query, cfg.Language, model, cfg.InputFiles)
+		if err != nil {
+			return nil, fmt.Errorf("image analysis failed: %w", err)
+		}
+		if imageContext != "" {
+			query = fmt.Sprintf("%s\n\nAttached image context:\n%s", query, imageContext)
+		}
+		steps = append(steps, StepInfo{
+			StepNumber:  stepNum,
+			Type:        "image_analysis",
+			Description: fmt.Sprintf("Analyzed %d attached image(s) as research context", len(cfg.InputFiles)),
+			Query:       originalQuery,
+			Result:      fmt.Sprintf("Image context: %d chars", len(imageContext)),
+		})
+	}
 
 	// ── Step 1: Plan ────────────────────────────────────────────────────────
 	stepNum++
@@ -348,8 +401,8 @@ func (c *Client) DeepResearch(ctx context.Context, query string, opts ...DeepRes
 
 	durationMs := time.Since(startTime).Milliseconds()
 	result := &DeepResearchResult{
-		ID:          generateResearchID(query, createdAt),
-		Query:       query,
+		ID:          generateResearchID(originalQuery, createdAt),
+		Query:       originalQuery,
 		Summary:     summary,
 		Sources:     allSources,
 		Steps:       steps,
@@ -360,7 +413,7 @@ func (c *Client) DeepResearch(ctx context.Context, query string, opts ...DeepRes
 	}
 
 	c.log.Info("✅ Deep research completed",
-		zap.String("query", query),
+		zap.String("query", originalQuery),
 		zap.Int("steps", len(steps)),
 		zap.Int("sources", len(allSources)),
 		zap.Int64("duration_ms", durationMs),
@@ -388,11 +441,39 @@ func (c *Client) DeepResearchStream(ctx context.Context, query string, cb Progre
 	}
 	c.mu.RUnlock()
 
+	originalQuery := query
+
 	var steps []StepInfo
 	var allSources []SourceInfo
 	stepNum := 0
 
 	emit := func(ev DeepResearchEvent) bool { return cb(ev) }
+
+	if len(cfg.InputFiles) > 0 {
+		if !emit(DeepResearchEvent{Event: EventTypeProgress, Message: "Analyzing attached image context...", Progress: 3}) {
+			return nil
+		}
+		stepNum++
+		imageContext, err := c.analyzeResearchInputFiles(ctx, query, cfg.Language, model, cfg.InputFiles)
+		if err != nil {
+			emit(DeepResearchEvent{Event: EventTypeError, Error: fmt.Sprintf("Image analysis failed: %s", err)})
+			return err
+		}
+		if imageContext != "" {
+			query = fmt.Sprintf("%s\n\nAttached image context:\n%s", query, imageContext)
+		}
+		imageStep := StepInfo{
+			StepNumber:  stepNum,
+			Type:        "image_analysis",
+			Description: fmt.Sprintf("Analyzed %d attached image(s) as research context", len(cfg.InputFiles)),
+			Query:       originalQuery,
+			Result:      fmt.Sprintf("Image context: %d chars", len(imageContext)),
+		}
+		steps = append(steps, imageStep)
+		if !emit(DeepResearchEvent{Event: EventTypeStep, Message: imageStep.Description, Progress: 5, Step: &imageStep}) {
+			return nil
+		}
+	}
 
 	// ── Step 1: Plan ────────────────────────────────────────────────────────
 	if !emit(DeepResearchEvent{Event: EventTypeProgress, Message: "Planning research strategy...", Progress: 5}) {
@@ -423,8 +504,8 @@ func (c *Client) DeepResearchStream(ctx context.Context, query string, cb Progre
 	for i, q := range plan.SubQuestions {
 		pct := 10 + int(float64(i)/float64(total)*70)
 		if !emit(DeepResearchEvent{
-			Event:   EventTypeProgress,
-			Message: fmt.Sprintf("Researching [%d/%d]: %s", i+1, total, q),
+			Event:    EventTypeProgress,
+			Message:  fmt.Sprintf("Researching [%d/%d]: %s", i+1, total, q),
 			Progress: pct,
 		}) {
 			return nil
@@ -487,8 +568,8 @@ func (c *Client) DeepResearchStream(ctx context.Context, query string, cb Progre
 
 	durationMs := time.Since(startTime).Milliseconds()
 	result := &DeepResearchResult{
-		ID:          generateResearchID(query, createdAt),
-		Query:       query,
+		ID:          generateResearchID(originalQuery, createdAt),
+		Query:       originalQuery,
 		Summary:     summary,
 		Sources:     allSources,
 		Steps:       steps,

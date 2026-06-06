@@ -59,6 +59,13 @@ func (s *OpenAIService) CreateChatCompletion(ctx context.Context, req dto.ChatCo
 	if req.Model != "" {
 		opts = append(opts, providers.WithModel(req.Model))
 	}
+	inputFiles, err := providers.InputFilesFromAttachments(modelMessages)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputFiles) > 0 {
+		opts = append(opts, providers.WithInputFiles(inputFiles))
+	}
 
 	// Logic: Call Provider
 	response, err := s.client.GenerateContent(ctx, prompt, opts...)
@@ -337,7 +344,6 @@ func (s *OpenAIService) buildFallbackToolCalls(req dto.ChatCompletionRequest) []
 
 	return nil
 }
-
 
 func decodeToolBridgePayload(text string) (toolBridgePayload, bool) {
 	var payload toolBridgePayload

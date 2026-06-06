@@ -6,28 +6,46 @@ import (
 	"fmt"
 )
 
-// GeminiChatSession implements ChatSession interface for Gemini
+// GeminiChatSession implements ChatSession interface for Gemini.
 type GeminiChatSession struct {
-	client   *Client // Refers to providers.Client
+	client   *Client
 	model    string
 	metadata *SessionMetadata
 	history  []Message
 }
 
-// SendMessage sends a message in the chat session
+// SendMessage sends a message in the chat session.
 func (s *GeminiChatSession) SendMessage(ctx context.Context, message string, options ...GenerateOption) (*Response, error) {
-	// Read session token safely — short critical section, no lock held during HTTP call
+	config := &GenerateConfig{}
+	for _, opt := range options {
+		opt(config)
+	}
+
 	s.client.mu.RLock()
 	at := s.client.at
+	cookieHdr := s.client.cookieHeader
 	s.client.mu.RUnlock()
 
 	if at == "" {
 		return nil, fmt.Errorf("client not initialized")
 	}
 
-	// Build conversation context
+	uploadedFiles, err := s.client.uploadRequestFiles(ctx, config, cookieHdr)
+	if err != nil {
+		return nil, err
+	}
+
+	messageContent := []interface{}{message}
+	if len(uploadedFiles) > 0 {
+		fileData := make([]interface{}, 0, len(uploadedFiles))
+		for _, file := range uploadedFiles {
+			fileData = append(fileData, []interface{}{[]interface{}{file.ID}, file.Name})
+		}
+		messageContent = []interface{}{message, 0, nil, fileData, nil, nil, 0}
+	}
+
 	inner := []interface{}{
-		[]interface{}{message},
+		messageContent,
 		nil,
 		s.buildMetadata(),
 	}
@@ -46,7 +64,6 @@ func (s *GeminiChatSession) SendMessage(ctx context.Context, message string, opt
 		SetFormData(formData).
 		SetQueryParam("at", at).
 		Post(EndpointGenerate)
-
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +77,6 @@ func (s *GeminiChatSession) SendMessage(ctx context.Context, message string, opt
 		return nil, err
 	}
 
-	// Update session metadata
 	if response.Metadata != nil {
 		if cid, ok := response.Metadata["cid"].(string); ok && cid != "" {
 			if s.metadata == nil {
@@ -82,7 +98,6 @@ func (s *GeminiChatSession) SendMessage(ctx context.Context, message string, opt
 		}
 	}
 
-	// Update history
 	s.history = append(s.history, Message{
 		Role:    "user",
 		Content: message,
@@ -95,7 +110,7 @@ func (s *GeminiChatSession) SendMessage(ctx context.Context, message string, opt
 	return response, nil
 }
 
-// GetMetadata returns session metadata
+// GetMetadata returns session metadata.
 func (s *GeminiChatSession) GetMetadata() *SessionMetadata {
 	if s.metadata == nil {
 		return &SessionMetadata{
@@ -106,18 +121,17 @@ func (s *GeminiChatSession) GetMetadata() *SessionMetadata {
 	return s.metadata
 }
 
-// GetHistory returns conversation history
+// GetHistory returns conversation history.
 func (s *GeminiChatSession) GetHistory() []Message {
 	return s.history
 }
 
-// Clear clears the conversation history
+// Clear clears the conversation history.
 func (s *GeminiChatSession) Clear() {
 	s.history = []Message{}
 	s.metadata = nil
 }
 
-// buildMetadata builds metadata array for API request
 func (s *GeminiChatSession) buildMetadata() []interface{} {
 	if s.metadata == nil {
 		return []interface{}{nil, nil, nil}

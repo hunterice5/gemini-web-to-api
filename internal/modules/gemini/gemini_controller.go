@@ -240,6 +240,7 @@ func (h *GeminiController) HandleInteractionCreate(c fiber.Ctx) error {
 		Query:      req.Input,
 		Language:   req.Language,
 		MaxSources: req.MaxSources,
+		Images:     req.Images,
 	}
 
 	if req.Stream {

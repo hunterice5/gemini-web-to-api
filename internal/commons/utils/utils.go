@@ -28,7 +28,11 @@ func BuildPromptFromMessages(messages []models.Message, systemPrompt string) str
 		} else if strings.EqualFold(msg.Role, "system") {
 			role = "System"
 		}
-		promptBuilder.WriteString(fmt.Sprintf("%s: %s\n", role, msg.Content))
+		content := msg.Content
+		if strings.TrimSpace(content) == "" && len(msg.Attachments) > 0 {
+			content = fmt.Sprintf("[%d file(s) attached]", len(msg.Attachments))
+		}
+		promptBuilder.WriteString(fmt.Sprintf("%s: %s\n", role, content))
 	}
 
 	return strings.TrimSpace(promptBuilder.String())
@@ -42,7 +46,7 @@ func ValidateMessages(messages []models.Message) error {
 
 	allEmpty := true
 	for _, msg := range messages {
-		if strings.TrimSpace(msg.Content) != "" {
+		if strings.TrimSpace(msg.Content) != "" || len(msg.Attachments) > 0 {
 			allEmpty = false
 			break
 		}
@@ -124,7 +128,6 @@ func SendSSEEvent(w *bufio.Writer, log *zap.Logger, v interface{}) bool {
 	}
 	return true
 }
-
 
 // SplitResponseIntoChunks simulates streaming by splitting response into chunks
 func SplitResponseIntoChunks(text string, delayMs int) []string {

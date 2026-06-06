@@ -39,6 +39,35 @@ type Part struct {
 	FunctionResponse *FunctionResponse `json:"function_response,omitempty"`
 }
 
+func (p *Part) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Text                  string            `json:"text"`
+		InlineDataSnake       *InlineData       `json:"inline_data"`
+		InlineDataCamel       *InlineData       `json:"inlineData"`
+		FunctionCallSnake     *FunctionCall     `json:"function_call"`
+		FunctionCallCamel     *FunctionCall     `json:"functionCall"`
+		FunctionResponseSnake *FunctionResponse `json:"function_response"`
+		FunctionResponseCamel *FunctionResponse `json:"functionResponse"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	p.Text = raw.Text
+	p.InlineData = raw.InlineDataSnake
+	if p.InlineData == nil {
+		p.InlineData = raw.InlineDataCamel
+	}
+	p.FunctionCall = raw.FunctionCallSnake
+	if p.FunctionCall == nil {
+		p.FunctionCall = raw.FunctionCallCamel
+	}
+	p.FunctionResponse = raw.FunctionResponseSnake
+	if p.FunctionResponse == nil {
+		p.FunctionResponse = raw.FunctionResponseCamel
+	}
+	return nil
+}
+
 // FunctionCall represents a model's request to call a tool
 type FunctionCall struct {
 	Name string          `json:"name"`
@@ -80,6 +109,23 @@ type InlineData struct {
 	Data     string `json:"data"`
 }
 
+func (d *InlineData) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		MimeTypeCamel string `json:"mimeType"`
+		MimeTypeSnake string `json:"mime_type"`
+		Data          string `json:"data"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	d.MimeType = raw.MimeTypeCamel
+	if d.MimeType == "" {
+		d.MimeType = raw.MimeTypeSnake
+	}
+	d.Data = raw.Data
+	return nil
+}
+
 // GenerationConfig represents generation configuration
 type GenerationConfig struct {
 	Temperature     float32 `json:"temperature,omitempty"`
@@ -96,10 +142,10 @@ type GeminiGenerateResponse struct {
 
 // Candidate represents a candidate response
 type Candidate struct {
-	Index         int       `json:"index"`
-	Content       Content   `json:"content"`
-	FinishReason  string    `json:"finishReason,omitempty"`
-	FinishMessage string    `json:"finishMessage,omitempty"`
+	Index         int     `json:"index"`
+	Content       Content `json:"content"`
+	FinishReason  string  `json:"finishReason,omitempty"`
+	FinishMessage string  `json:"finishMessage,omitempty"`
 }
 
 // UsageMetadata represents usage metadata

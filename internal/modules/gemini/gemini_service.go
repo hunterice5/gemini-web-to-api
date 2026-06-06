@@ -33,18 +33,33 @@ func (s *GeminiService) ListModels() []providers.ModelInfo {
 func (s *GeminiService) GenerateContent(ctx context.Context, modelID string, req dto.GeminiGenerateRequest) (*dto.GeminiGenerateResponse, error) {
 	// Logic: Extract prompt
 	var promptBuilder strings.Builder
+	inputFiles := make([]providers.InputFile, 0)
 	for _, content := range req.Contents {
-		for _, part := range content.Parts {
+		for i, part := range content.Parts {
 			if part.Text != "" {
 				promptBuilder.WriteString(part.Text)
 				promptBuilder.WriteString("\n")
+			}
+			if part.InlineData != nil && part.InlineData.Data != "" {
+				data, err := providers.DecodeBase64Data(part.InlineData.Data)
+				if err != nil {
+					return nil, fmt.Errorf("decode inline_data: %w", err)
+				}
+				inputFiles = append(inputFiles, providers.InputFile{
+					Name:     fmt.Sprintf("inline_%d%s", i+1, extensionForMimeType(part.InlineData.MimeType)),
+					MimeType: part.InlineData.MimeType,
+					Data:     data,
+				})
 			}
 		}
 	}
 
 	prompt := strings.TrimSpace(promptBuilder.String())
-	if prompt == "" {
+	if prompt == "" && len(inputFiles) == 0 {
 		return nil, fmt.Errorf("empty content")
+	}
+	if prompt == "" {
+		prompt = fmt.Sprintf("[%d file(s) attached]", len(inputFiles))
 	}
 
 	hasTools := len(req.Tools) > 0
@@ -54,6 +69,9 @@ func (s *GeminiService) GenerateContent(ctx context.Context, modelID string, req
 
 	// Logic: Call Provider
 	opts := []providers.GenerateOption{providers.WithModel(modelID)}
+	if len(inputFiles) > 0 {
+		opts = append(opts, providers.WithInputFiles(inputFiles))
+	}
 	response, err := s.client.GenerateContent(ctx, prompt, opts...)
 	if err != nil {
 		return nil, err
@@ -92,6 +110,21 @@ func (s *GeminiService) GenerateContent(ctx context.Context, modelID string, req
 			TotalTokenCount: 0,
 		},
 	}, nil
+}
+
+func extensionForMimeType(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	default:
+		return ".bin"
+	}
 }
 
 // GenerateContentStream handles Gemini's streaming simulation logic in the service layer.
@@ -246,6 +279,13 @@ func (s *GeminiService) DeepResearch(ctx context.Context, req dto.DeepResearchRe
 	if req.MaxSources > 0 {
 		opts = append(opts, providers.WithResearchMaxSources(req.MaxSources))
 	}
+	inputFiles, err := providers.InputFilesFromAttachmentList(req.Images)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputFiles) > 0 {
+		opts = append(opts, providers.WithResearchInputFiles(inputFiles))
+	}
 
 	result, err := s.client.DeepResearch(ctx, req.Query, opts...)
 	if err != nil {
@@ -266,6 +306,13 @@ func (s *GeminiService) DeepResearchStream(ctx context.Context, req dto.DeepRese
 	}
 	if req.MaxSources > 0 {
 		opts = append(opts, providers.WithResearchMaxSources(req.MaxSources))
+	}
+	inputFiles, err := providers.InputFilesFromAttachmentList(req.Images)
+	if err != nil {
+		return err
+	}
+	if len(inputFiles) > 0 {
+		opts = append(opts, providers.WithResearchInputFiles(inputFiles))
 	}
 
 	return s.client.DeepResearchStream(ctx, req.Query, func(ev providers.DeepResearchEvent) bool {
