@@ -95,13 +95,6 @@ func (c *Config) Validate() error {
 		missingVars = append(missingVars, "GEMINI_1PSID")
 	}
 
-	if c.Gemini.Secure1PSID != "" {
-		// If PSID is present, we need at least one of these
-		if c.Gemini.Secure1PSIDTS == "" {
-			missingVars = append(missingVars, "GEMINI_1PSIDTS")
-		}
-	}
-
 	// Check Server port is valid
 	if c.Server.Port == "" {
 		c.Server.Port = defaultServerPort

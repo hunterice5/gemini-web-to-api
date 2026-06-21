@@ -682,6 +682,19 @@ func resolveAvailableModel(requested string, models []ModelInfo) (string, bool) 
 		return "", false
 	}
 
+	if requested == "gemini-3.1-pro" || requested == "gemini-3-pro" {
+		for _, m := range models {
+			if m.ID == "gemini-3-pro-image-preview-11-2025" {
+				return m.ID, true
+			}
+		}
+		for _, m := range models {
+			if m.ID == "gemini-advanced" {
+				return m.ID, true
+			}
+		}
+	}
+
 	for _, model := range models {
 		if model.ID == requested {
 			return model.ID, true
